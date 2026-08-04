@@ -1248,10 +1248,10 @@ exports.replaceOrderPayment = async (req, res) => {
 exports.updateActiveOrder = async (req, res) => {
   try {
     const orderId = req.params.id;
-    const { itemsToAdd = [] } = req.body;
+    const { itemsToAdd = [], itemsToUpdate = [] } = req.body; // ✅ FIX: itemsToUpdate destructure kiya
 
-    if (!itemsToAdd || itemsToAdd.length === 0)
-      return res.status(400).json({ success: false, message: 'itemsToAdd empty hai' });
+    if ((!itemsToAdd || itemsToAdd.length === 0) && (!itemsToUpdate || itemsToUpdate.length === 0))
+      return res.status(400).json({ success: false, message: 'Koi item add ya update nahi kiya gaya' });
 
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
@@ -1260,9 +1260,21 @@ exports.updateActiveOrder = async (req, res) => {
     if (order.status === 'completed' || order.status === 'cancelled')
       return res.status(400).json({ success: false, message: `Order already ${order.status} hai` });
 
-    // ✅ NEW: System settings fetch
+    // System settings fetch
     const { kitchenSystemEnabled, barmanSystemEnabled } = await getSystemSettings(req.user.branchId);
 
+    // ✅ FIX: existing items ki quantity update karo (frontend +/- se aati hai)
+    for (const upd of itemsToUpdate) {
+      const idx = Number(upd.itemIndex);
+      if (Number.isInteger(idx) && order.items[idx]) {
+        const item = order.items[idx];
+        const newQty = Number(upd.quantity) || item.quantity;
+        item.quantity = newQty;
+        item.subtotal = (item.price || 0) * newQty;
+      }
+    }
+
+    // Existing items add loop — jaisa pehle tha
     for (const newItem of itemsToAdd) {
       const itemSubtotal = newItem.subtotal != null
         ? Number(newItem.subtotal)
@@ -1298,7 +1310,6 @@ exports.updateActiveOrder = async (req, res) => {
 
       if (newItem.isColdDrink || newItem.type === 'cold_drink') {
         order.hasColdDrinks = true;
-        // ✅ Only set pending if barman system ON
         if (barmanSystemEnabled) order.coldDrinksStatus = 'pending';
       }
     }
@@ -1307,7 +1318,7 @@ exports.updateActiveOrder = async (req, res) => {
     order.subtotal = newSubtotal;
     order.total = newSubtotal - (order.discount || 0);
 
-    // ✅ NEW: Kitchen OFF ho to updatedByWaiter flag mat lagao — chef ko notify nahi
+    // Kitchen OFF ho to updatedByWaiter flag mat lagao — chef ko notify nahi
     if (kitchenSystemEnabled) {
       order.updatedByWaiter = true;
       order.updatedByCashier = true;
@@ -1316,7 +1327,7 @@ exports.updateActiveOrder = async (req, res) => {
     }
 
     const wasReadyOrDelivered = ['ready', 'delivered'].includes(order.status);
-    // ✅ NEW: Kitchen OFF ho to status reset mat karo
+    // Kitchen OFF ho to status reset mat karo
     if (kitchenSystemEnabled && wasReadyOrDelivered) {
       order.status = 'preparing';
       order.stockDeducted = false;
@@ -1332,7 +1343,7 @@ exports.updateActiveOrder = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      // ✅ NEW: Sirf kitchen ON ho tab chef ko emit karo
+      // Sirf kitchen ON ho tab chef ko emit karo
       if (kitchenSystemEnabled) {
         io.to(String(req.user.branchId)).emit('order-updated', {
           orderId: String(order._id),
@@ -1373,10 +1384,9 @@ exports.updateActiveOrder = async (req, res) => {
     res.json({
       success: true,
       order: populatedOrder,
-      // ✅ NEW: Frontend ko pata chale kitchen ON/OFF hai
       kitchenSystemEnabled,
       barmanSystemEnabled,
-      message: `✅ Order #${order.orderNumber} update ho gaya — ${itemsToAdd.length} item(s) add hue`,
+      message: `✅ Order #${order.orderNumber} update ho gaya — ${itemsToAdd.length} naya, ${itemsToUpdate.length} qty change hue`,
     });
   } catch (error) {
     console.error('Update active order error:', error);
