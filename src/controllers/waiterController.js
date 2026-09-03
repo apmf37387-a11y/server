@@ -229,15 +229,9 @@ exports.createOrder = async (req, res) => {
 
     const hasColdDrinksInOrder = processedItems.some(i => i.isColdDrink || i.type === 'cold_drink');
 
-    // ── Determine initial status based on kitchen system ──────────────────
-    // Kitchen OFF → order starts as 'ready' (skip chef), deduct ingredients now
-    // Kitchen ON  → order starts as 'pending' (chef accepts)
     const initialStatus = kitchenSystemEnabled ? 'pending' : 'ready';
-    const initialStockDed = !kitchenSystemEnabled; // if kitchen OFF, stock deducted at creation
+    const initialStockDed = !kitchenSystemEnabled;
 
-    // ── Determine coldDrinksStatus based on barman system ─────────────────
-    // Barman OFF → auto-delivered, deduct from ColdDrink inventory now
-    // Barman ON  → pending (barman delivers)
     const coldDrinksStatus = (!hasColdDrinksInOrder || !barmanSystemEnabled)
       ? 'delivered'
       : 'pending';
@@ -317,7 +311,6 @@ exports.createOrder = async (req, res) => {
           deliveryBoyId: String(deliveryBoyId), assignedBy: req.user.name || 'Waiter',
         });
       }
-      // Notify barman only if barman system is ON
       if (hasColdDrinksInOrder && barmanSystemEnabled) {
         io.to(`branch-${String(branchId)}`).emit('new-colddrink-order', {
           orderId: String(order._id), orderNumber: order.orderNumber,
@@ -329,7 +322,7 @@ exports.createOrder = async (req, res) => {
           message: `🧃 New cold drink order #${order.orderNumber}`,
         });
       }
-      // Notify chef only if kitchen system is ON
+      // Chef notification — sirf jab kitchen system ON ho (unchanged)
       if (kitchenSystemEnabled) {
         io.to(`branch-${String(branchId)}`).emit('new-order', {
           orderId: order._id, orderNumber: order.orderNumber,
@@ -337,6 +330,31 @@ exports.createOrder = async (req, res) => {
           floor: order.floor, total: order.total, itemCount: processedItems.length,
         });
       }
+
+      // ── ✅ NEW: Kitchen SLIP auto-print — HAMESHA, koi toggle check nahi ──
+      // Cashier flow jaisa: silent, backend-driven, frontend pe koi UI nahi.
+      io.to(`branch-${String(branchId)}`).emit('kitchen-print-request', {
+        _id: String(order._id),
+        orderId: String(order._id),
+        orderNumber: order.orderNumber,
+        orderType: order.orderType,
+        tableNumber: order.tableNumber || null,
+        floor: order.floor || null,
+        customerName: order.customerName || null,
+        customerPhone: order.customerPhone || null,
+        deliveryAddress: order.deliveryAddress || null,
+        waiterName: req.user.name || 'Waiter',
+        cashierNote: order.cashierNote || null,
+        notes: order.notes || null,
+        createdAt: order.createdAt,
+        items: processedItems.map(i => ({
+          name: i.name,
+          quantity: i.quantity,
+          size: i.size || null,
+          customizations: Array.isArray(i.customizations) ? i.customizations : [],
+          note: i.note || null,
+        })),
+      });
     }
 
     res.status(201).json({
@@ -412,6 +430,11 @@ exports.updateOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Kam se kam ek item zaroori hai' });
     }
 
+    // ✅ NEW: purane items snapshot — sirf kitchen slip ke liye "kya naya add hua" nikalne ke liye
+    const previousItemsKey = (order.items || []).map(
+      i => `${String(i.itemId || '')}_${i.size || ''}_${i.name || ''}`
+    );
+
     const processedItems = items.map(item => {
       let itemType = item.itemType;
       if (!itemType) {
@@ -431,6 +454,8 @@ exports.updateOrder = async (req, res) => {
         isColdDrink: item.isColdDrink || false,
         coldDrinkId: item.coldDrinkId || null,
         coldDrinkSizeId: item.coldDrinkSizeId || null,
+        customizations: Array.isArray(item.customizations) ? item.customizations : [],
+        note: item.note || null,
       };
     });
 
@@ -462,9 +487,16 @@ exports.updateOrder = async (req, res) => {
 
     const populatedOrder = await Order.findById(order._id)
       .populate('waiterId', 'name')
-      .populate('deliveryBoyId', 'name phone')
+      .populate('deliveryBoyId', 'name')
       .populate('chefId', 'name')
       .populate('items.itemId', 'name');
+
+    // ✅ NEW: sirf naye add-hone-wale items nikalo (jo purane snapshot mein nahi thay)
+    const newlyAddedItems = processedItems.filter(i => {
+      const key = `${i.itemId}_${i.size || ''}_${i.name}`;
+      return !previousItemsKey.includes(key);
+    });
+    const kitchenItemsToPrint = newlyAddedItems.length > 0 ? newlyAddedItems : processedItems;
 
     try {
       const io = req.app.get('io');
@@ -489,6 +521,30 @@ exports.updateOrder = async (req, res) => {
           message: statusReset
             ? `⚠️ ${req.user.name || 'Waiter'} ne ready/delivered order update ki — dobara check karein!`
             : `📝 ${req.user.name || 'Waiter'} ne order #${order.orderNumber} update kiya`,
+        });
+
+        // ── ✅ NEW: Kitchen SLIP auto-print on update — HAMESHA, silent ──
+        io.to(`branch-${String(order.branchId)}`).emit('kitchen-print-request', {
+          _id: String(order._id),
+          orderId: String(order._id),
+          orderNumber: order.orderNumber,
+          orderType: order.orderType,
+          tableNumber: order.tableNumber || null,
+          floor: order.floor || null,
+          customerName: order.customerName || null,
+          customerPhone: order.customerPhone || null,
+          deliveryAddress: order.deliveryAddress || null,
+          waiterName: req.user.name || 'Waiter',
+          cashierNote: order.cashierNote || null,
+          notes: `UPDATED ORDER${newlyAddedItems.length > 0 ? '' : ' — full items (no new item detected)'}`,
+          createdAt: order.waiterUpdatedAt,
+          items: kitchenItemsToPrint.map(i => ({
+            name: i.name,
+            quantity: i.quantity,
+            size: i.size || null,
+            customizations: i.customizations || [],
+            note: i.note || null,
+          })),
         });
       }
     } catch (socketErr) {

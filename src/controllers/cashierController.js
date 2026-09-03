@@ -560,16 +560,30 @@ exports.getHourlyIncomeReport = async (req, res) => {
       const hour = new Date(payment.paidAt).getHours();
       hourlyData[hour].totalAmount += payment.amount;
       hourlyData[hour].orderCount += 1;
-      if (payment.method === 'cash') hourlyData[hour].cash += payment.amount;
-      else if (payment.method === 'mezan_bank') hourlyData[hour].mezan_bank += payment.amount;
-      else if (payment.method === 'online') hourlyData[hour].online += payment.amount;
+
+      if (payment.method === 'cash') {
+        hourlyData[hour].cash += payment.amount;
+      } else {
+        if (payment.method === 'mezan_bank') hourlyData[hour].mezan_bank += payment.amount;
+        else if (payment.method === 'online') hourlyData[hour].online += payment.amount;
+
+        // ✅ NEW: non-cash overpayment ka change physical cash drawer se jata hai
+        const changeOut = Number(payment.changeAmount || 0);
+        if (changeOut > 0) hourlyData[hour].cash -= changeOut;
+      }
     });
 
     const hourlyArray = Object.values(hourlyData).filter(h => h.totalAmount > 0 || h.orderCount > 0);
+
+    // ✅ NEW: same deduction summary totals mein bhi
+    const changeGivenFromCash = payments
+      .filter(p => p.method !== 'cash' && Number(p.changeAmount) > 0)
+      .reduce((s, p) => s + Number(p.changeAmount), 0);
+
     const summary = {
       totalRevenue: payments.reduce((s, p) => s + p.amount, 0),
       totalOrders: payments.length,
-      cashTotal: payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0),
+      cashTotal: payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0) - changeGivenFromCash,
       mezan_bankTotal: payments.filter(p => p.method === 'mezan_bank').reduce((s, p) => s + p.amount, 0),
       onlineTotal: payments.filter(p => p.method === 'online').reduce((s, p) => s + p.amount, 0),
       peakHour: hourlyArray.length > 0
@@ -634,8 +648,12 @@ exports.getCashierShiftReport = async (req, res) => {
     }).populate('addedBy', 'name');
 
     // ── Revenue summary ──
+    const changeGivenFromCash = payments
+      .filter(p => p.method !== 'cash' && Number(p.changeAmount) > 0)
+      .reduce((s, p) => s + Number(p.changeAmount), 0);
+
     const totalRevenue = payments.reduce((s, p) => s + p.amount, 0);
-    const cashReceived = payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0);
+    const cashReceived = payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0) - changeGivenFromCash;
     const mezan_bankReceived = payments.filter(p => p.method === 'mezan_bank').reduce((s, p) => s + p.amount, 0);
     const onlineReceived = payments.filter(p => p.method === 'online').reduce((s, p) => s + p.amount, 0);
     const jazzReceived = payments.filter(p => p.method === 'jazz_cash').reduce((s, p) => s + p.amount, 0);
@@ -1038,11 +1056,18 @@ exports.getAmountSummary = async (req, res) => {
       .populate('orderId', 'orderNumber orderType')
       .sort({ paidAt: -1 });
 
+    // ✅ NEW: non-cash payment (mezan_bank/jazzcash/easypaisa/online) mein
+    //    agar customer nay order say zyada dia ho, to wo extra "change"
+    //    physical CASH drawer say wapis jata hai — is liye cash total say minus
+    const changeGivenFromCash = payments
+      .filter(p => p.method !== 'cash' && Number(p.changeAmount) > 0)
+      .reduce((s, p) => s + Number(p.changeAmount), 0);
+
     // ✅ Keys MUST match frontend exactly
     const summary = {
       totalRevenue: payments.reduce((s, p) => s + p.amount, 0),
       totalTransactions: payments.length,
-      cashTotal: payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0),
+      cashTotal: payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0) - changeGivenFromCash,
       mezan_bankTotal: payments.filter(p => p.method === 'mezan_bank').reduce((s, p) => s + p.amount, 0),
       onlineTotal: payments.filter(p => p.method === 'online').reduce((s, p) => s + p.amount, 0),
       jazz_cashTotal: payments.filter(p => p.method === 'jazz_cash').reduce((s, p) => s + p.amount, 0),
