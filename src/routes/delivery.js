@@ -15,7 +15,10 @@ const {
   updateOrder,
   getDeliveryHistory,
   markDeliveredTakeaway,
-  extractMeterReading
+  extractMeterReading,
+  claimMultipleOrders,
+  updateOrderStatusMultiple,
+  completeDeliveryMultiple,
 } = require('../controllers/deliveryController');
 
 router.use(protect);
@@ -33,6 +36,9 @@ router.put('/orders/complete',               completeDelivery);
 router.post('/orders/:id/print-request',     requestPrint);          // ✅ NEW — same as waiter
 router.put('/orders/:id',                    updateOrder);
 router.post('/extract-meter-reading',        extractMeterReading);
+router.put('/orders/claim-multiple',   claimMultipleOrders);
+router.put('/orders/status-multiple',  updateOrderStatusMultiple);
+router.put('/orders/complete-multiple', completeDeliveryMultiple);
 
 module.exports = router;
 

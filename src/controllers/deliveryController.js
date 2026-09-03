@@ -756,4 +756,184 @@ exports.getDeliveryBoyStats = async (req, res) => {
   }
 };
 
+exports.claimMultipleOrders = async (req, res) => {
+  try {
+    const { orderIds } = req.body;
+    if (!Array.isArray(orderIds) || orderIds.length === 0)
+      return res.status(400).json({ success: false, message: 'orderIds array zaroori hai' });
+
+    const tripId = `TRIP-${Date.now()}-${req.user._id}`;
+
+    const result = await Order.updateMany(
+      {
+        _id: { $in: orderIds },
+        orderType: 'delivery',
+        status: 'ready',
+        deliveryBoyId: null,
+        branchId: req.user.branchId,
+      },
+      { $set: { deliveryBoyId: req.user._id, deliveryTripId: tripId } }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Yeh orders pehle hi claim ho chuki hain ya available nahi hain',
+      });
+    }
+
+    const claimedOrders = await Order.find({ deliveryTripId: tripId, deliveryBoyId: req.user._id })
+      .populate('waiterId', 'name')
+      .populate('deliveryBoyId', 'name phone')
+      .populate('items.itemId', 'name');
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`branch-${req.user.branchId}`).emit('order-claimed', {
+        orderIds: claimedOrders.map(o => String(o._id)),
+        orderNumbers: claimedOrders.map(o => o.orderNumber),
+        claimedBy: req.user.name || 'Delivery Boy',
+        claimedById: String(req.user._id),
+        tripId,
+      });
+    }
+
+    const partial = result.modifiedCount < orderIds.length;
+
+    res.json({
+      success: true,
+      orders: claimedOrders,
+      tripId,
+      message: partial
+        ? `${claimedOrders.length} orders mil gayi — baaki koi aur claim kar chuka tha`
+        : `${claimedOrders.length} orders aapne claim kar li!`,
+    });
+  } catch (error) {
+    console.error('Claim multiple orders error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ========== STATUS UPDATE FOR MULTIPLE ORDERS (ek hi departure meter sab pe) ==========
+exports.updateOrderStatusMultiple = async (req, res) => {
+  try {
+    const { orderIds, status, departureMeterReading } = req.body;
+    if (!Array.isArray(orderIds) || orderIds.length === 0)
+      return res.status(400).json({ success: false, message: 'orderIds array zaroori hai' });
+
+    const owned = await Order.find({ _id: { $in: orderIds }, deliveryBoyId: req.user._id });
+    if (owned.length !== orderIds.length)
+      return res.status(403).json({ success: false, message: 'Kuch orders aapki nahi hain ya nahi milin' });
+
+    const update = { status };
+    if (status === 'out_for_delivery') {
+      update.departedAt = new Date();
+      if (departureMeterReading != null && !isNaN(Number(departureMeterReading))) {
+        update.departureMeterReading = parseFloat(departureMeterReading);
+        update.startMeterReading = parseFloat(departureMeterReading); // legacy
+      }
+    }
+    if (status === 'delivered') update.deliveredAt = new Date();
+
+    await Order.updateMany({ _id: { $in: orderIds } }, { $set: update });
+
+    const populatedOrders = await Order.find({ _id: { $in: orderIds } })
+      .populate('deliveryBoyId', 'name')
+      .populate('items.itemId', 'name');
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`branch-${String(req.user.branchId)}`).emit('order-updated', {
+        orderIds,
+        orderNumbers: populatedOrders.map(o => o.orderNumber),
+        newStatus: status,
+        departureMeterReading: update.departureMeterReading ?? null,
+        message: `🚀 ${orderIds.length} orders out for delivery`,
+      });
+    }
+
+    res.json({ success: true, orders: populatedOrders, message: `Status updated to ${status}` });
+  } catch (error) {
+    console.error('Update order status (multiple) error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ========== COMPLETE DELIVERY FOR MULTIPLE ORDERS (ek hi return meter sab pe) ==========
+exports.completeDeliveryMultiple = async (req, res) => {
+  try {
+    const { orders: orderPayloads, returnMeterReading } = req.body;
+    // orderPayloads: [{ orderId, cashReceived }, ...]  — cash har order ka alag ho sakta hai
+    if (!Array.isArray(orderPayloads) || orderPayloads.length === 0)
+      return res.status(400).json({ success: false, message: 'orders array zaroori hai' });
+    if (returnMeterReading == null || isNaN(Number(returnMeterReading)))
+      return res.status(400).json({ success: false, message: 'returnMeterReading zaroori hai' });
+
+    const returnReading = parseFloat(returnMeterReading);
+    const results = [];
+
+    for (const { orderId, cashReceived } of orderPayloads) {
+      if (cashReceived == null) continue;
+      const order = await Order.findById(orderId);
+      if (!order) continue;
+      if (String(order.deliveryBoyId) !== String(req.user._id)) continue;
+      if (order.status !== 'out_for_delivery') continue;
+
+      order.status = 'returned';
+      order.cashReceived = parseFloat(cashReceived);
+      order.returnedAt = new Date();
+      order.returnMeterReading = returnReading;
+      order.endMeterReading = returnReading; // legacy
+
+      const departure = order.departureMeterReading ?? order.startMeterReading ?? null;
+      order.distanceTravelled = (departure != null && returnReading > departure)
+        ? parseFloat((returnReading - departure).toFixed(1))
+        : 0;
+
+      await order.save();
+      results.push(order);
+    }
+
+    if (results.length === 0)
+      return res.status(400).json({ success: false, message: 'Koi order update nahi hui — status ya ownership check karein' });
+
+    const populatedOrders = await Order.find({ _id: { $in: results.map(o => o._id) } })
+      .populate('deliveryBoyId', 'name')
+      .populate('items.itemId', 'name');
+
+    const totalCash = results.reduce((s, o) => s + o.cashReceived, 0);
+    const totalAmount = results.reduce((s, o) => s + o.total, 0);
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`branch-${String(req.user.branchId)}`).emit('delivery-returned', {
+        orderIds: results.map(o => String(o._id)),
+        orderNumbers: results.map(o => o.orderNumber),
+        deliveryBoyName: req.user.name || 'Delivery Boy',
+        totalCashReceived: totalCash,
+        returnMeterReading: returnReading,
+        distanceTravelled: results[0].distanceTravelled ?? null,
+        message: `🏠 ${results.length} orders wapas! Cash: Rs.${totalCash}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      orders: populatedOrders,
+      summary: {
+        totalCashReceived: totalCash,
+        totalAmount,
+        change: totalCash - totalAmount,
+        returnMeterReading: returnReading,
+        distanceTravelled: results[0].distanceTravelled ?? null,
+        ordersCompleted: results.length,
+      },
+      message: `🏠 Wapas aa gaye! ${results.length} orders complete. Cashier se payment verify karwaein.`,
+    });
+  } catch (error) {
+    console.error('Complete delivery (multiple) error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = exports;

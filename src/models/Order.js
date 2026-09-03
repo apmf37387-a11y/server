@@ -72,10 +72,12 @@ const orderSchema = new mongoose.Schema({
   waiterUpdatedAt: { type: Date, default: null },
   waiterUpdatedBy: { type: String, default: null },
 
+
   // Stock deduction tracking
   stockDeducted: { type: Boolean, default: false },
 
   // ── Delivery Meter Tracking ────────────────────────────────────────────────
+  deliveryTripId: { type: String, default: null, index: true },
   startMeterReading: { type: Number },
   endMeterReading: { type: Number },
   distanceTravelled: { type: Number },
