@@ -120,13 +120,16 @@ exports.createDeliveryOrder = async (req, res) => {
       ? `🥡 Takeaway — ${customerName} | ${customerPhone}`
       : `🚚 Delivery — ${customerName} | ${customerPhone}`;
 
+    const isCreatorDeliveryBoy = req.user.role === 'delivery';
+
     const orderData = {
       orderNumber: await generateOrderNumber(),
       branchId,
       orderType,
       items: processedItems,
       subtotal, tax, total, estimatedTime,
-      deliveryBoyId: req.user._id,
+      deliveryBoyId: isCreatorDeliveryBoy ? req.user._id : null,   // ✅
+      waiterId: !isCreatorDeliveryBoy ? req.user._id : undefined,  // ✅ optional: track who created it
       customerName, customerPhone, notes, cashierNote,
       status: initialStatus,
       stockDeducted: initialStockDed,
