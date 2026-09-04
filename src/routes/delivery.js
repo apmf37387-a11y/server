@@ -20,10 +20,10 @@ const {
   updateOrderStatusMultiple,
   completeDeliveryMultiple,
 } = require('../controllers/deliveryController');
-
+ 
 router.use(protect);
 router.use(checkRole(UserRole.DELIVERY));
-
+ 
 router.get('/menu',                          getMenu);
 router.post('/orders',                       createDeliveryOrder);
 router.get('/orders/my-orders',              getMyOrders);
@@ -33,13 +33,19 @@ router.get('/orders/history',                getDeliveryHistory);    // specific
 router.put('/orders/claim',                  claimOrder);
 router.put('/orders/status',                 updateOrderStatus);
 router.put('/orders/complete',               completeDelivery);
+ 
+// ✅ Multi-order (trip) routes — YEH `/orders/:id` SE UPAR HONA ZAROORI HAI.
+// Express routes ko top-se-bottom match karta hai — agar yeh `/orders/:id`
+// ke baad hote to Express "claim-multiple" ko `:id` samajh kar updateOrder
+// function chala deta (ObjectId cast crash). Isi wajah se error dobara aaya tha.
+router.put('/orders/claim-multiple',         claimMultipleOrders);
+router.put('/orders/status-multiple',        updateOrderStatusMultiple);
+router.put('/orders/complete-multiple',      completeDeliveryMultiple);
+ 
 router.post('/orders/:id/print-request',     requestPrint);          // ✅ NEW — same as waiter
-router.put('/orders/:id',                    updateOrder);
+router.put('/orders/:id',                    updateOrder);           // ⚠️ catch-all — hamesha SABSE NEECHE rahe
 router.post('/extract-meter-reading',        extractMeterReading);
-router.put('/orders/claim-multiple',   claimMultipleOrders);
-router.put('/orders/status-multiple',  updateOrderStatusMultiple);
-router.put('/orders/complete-multiple', completeDeliveryMultiple);
-
+ 
 module.exports = router;
 
 ///zdaJHY9i8At00Bta
