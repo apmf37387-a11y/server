@@ -556,37 +556,22 @@ exports.getHourlyIncomeReport = async (req, res) => {
       };
     }
 
-    let totalRevenue = 0, cashTotal = 0, mezan_bankTotal = 0, onlineTotal = 0;
-
     payments.forEach(payment => {
       const hour = new Date(payment.paidAt).getHours();
-      const amt = Number(payment.amount || 0);
-      const change = Number(payment.changeAmount || 0);
-
-      hourlyData[hour].totalAmount += amt;
+      hourlyData[hour].totalAmount += payment.amount;
       hourlyData[hour].orderCount += 1;
-      totalRevenue += amt;
-
-      if (payment.method === 'cash') {
-        hourlyData[hour].cash += amt;
-        cashTotal += amt;
-      } else {
-        const accountReceived = amt + change; // ✅ full account amount
-        hourlyData[hour].cash -= change;      // ✅ return cash se cut
-        cashTotal -= change;
-
-        if (payment.method === 'mezan_bank') { hourlyData[hour].mezan_bank += accountReceived; mezan_bankTotal += accountReceived; }
-        else if (payment.method === 'online') { hourlyData[hour].online += accountReceived; onlineTotal += accountReceived; }
-      }
+      if (payment.method === 'cash') hourlyData[hour].cash += payment.amount;
+      else if (payment.method === 'mezan_bank') hourlyData[hour].mezan_bank += payment.amount;
+      else if (payment.method === 'online') hourlyData[hour].online += payment.amount;
     });
 
     const hourlyArray = Object.values(hourlyData).filter(h => h.totalAmount > 0 || h.orderCount > 0);
     const summary = {
-      totalRevenue,
+      totalRevenue: payments.reduce((s, p) => s + p.amount, 0),
       totalOrders: payments.length,
-      cashTotal,
-      mezan_bankTotal,
-      onlineTotal,
+      cashTotal: payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0),
+      mezan_bankTotal: payments.filter(p => p.method === 'mezan_bank').reduce((s, p) => s + p.amount, 0),
+      onlineTotal: payments.filter(p => p.method === 'online').reduce((s, p) => s + p.amount, 0),
       peakHour: hourlyArray.length > 0
         ? hourlyArray.reduce((max, h) => h.totalAmount > max.totalAmount ? h : max, hourlyArray[0])
         : null,
@@ -649,41 +634,14 @@ exports.getCashierShiftReport = async (req, res) => {
     }).populate('addedBy', 'name');
 
     // ── Revenue summary ──
-    // ✅ har payment ka asal account-received amount aur cash-return calculate
-    let cashReceived = 0, mezan_bankReceived = 0, onlineReceived = 0, jazzReceived = 0, easyReceived = 0;
-    let totalRevenue = 0;
-    const returns = []; // ✅ "Return" entries report/slip ke liye
+    const totalRevenue = payments.reduce((s, p) => s + p.amount, 0);
+    const cashReceived = payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0);
+    const mezan_bankReceived = payments.filter(p => p.method === 'mezan_bank').reduce((s, p) => s + p.amount, 0);
+    const onlineReceived = payments.filter(p => p.method === 'online').reduce((s, p) => s + p.amount, 0);
+    const jazzReceived = payments.filter(p => p.method === 'jazz_cash').reduce((s, p) => s + p.amount, 0);
+    const easyReceived = payments.filter(p => p.method === 'easypaisa').reduce((s, p) => s + p.amount, 0);
 
-    payments.forEach(p => {
-      const amt = Number(p.amount || 0);
-      const change = Number(p.changeAmount || 0);
-      totalRevenue += amt;
-
-      if (p.method === 'cash') {
-        cashReceived += amt;
-      } else {
-        const accountReceived = amt + change; // ✅ us account mein asal jitna aaya
-        cashReceived -= change;                // ✅ return cash se cut
-
-        if (p.method === 'mezan_bank') mezan_bankReceived += accountReceived;
-        else if (p.method === 'online') onlineReceived += accountReceived;
-        else if (p.method === 'jazz_cash') jazzReceived += accountReceived;
-        else if (p.method === 'easypaisa') easyReceived += accountReceived;
-
-        if (change > 0) {
-          returns.push({
-            orderNumber: p.orderId?.orderNumber || '-',
-            method: p.method,
-            returnAmount: change,
-            paidAt: p.paidAt,
-          });
-        }
-      }
-    });
-
-    const totalReturns = returns.reduce((s, r) => s + r.returnAmount, 0);
-
-    // ── Expense summary ── ✅ yehi missing ho gaya tha
+    // ── Expense summary ──
     const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
 
     const expensesByMethod = {};
@@ -705,16 +663,14 @@ exports.getCashierShiftReport = async (req, res) => {
       },
       payments,
       expenses,
-      returns,          // ✅ NEW
       summary: {
         totalOrders: payments.length,
         totalRevenue,
         cashReceived,
-        mezan_bankReceived,
+        mezan_bankReceived,   // ✅ consistent key
         onlineReceived,
         jazzReceived,
         easyReceived,
-        totalReturns,   // ✅ NEW
         totalExpenses,
         expensesByMethod,
         netAmount,
@@ -1082,50 +1038,15 @@ exports.getAmountSummary = async (req, res) => {
       .populate('orderId', 'orderNumber orderType')
       .sort({ paidAt: -1 });
 
-    // ✅ NEW: account-wise correct totals
-    //    - Cash method: amount as-is (uska apna change cash mein hi wapas jata hai, self-cancel)
-    //    - Non-cash method: amount + changeAmount = us account mein asal mein jitna aaya
-    //      aur wo changeAmount cash se minus (kyunke customer ko cash mein wapas diya gaya)
-    let cashTotal = 0, mezan_bankTotal = 0, onlineTotal = 0, jazz_cashTotal = 0, easypaisaTotal = 0;
-    let totalRevenue = 0;
-    const returns = []; // ✅ NEW: return entries — report mein "Return" k naam se dikhengi
-
-    payments.forEach(p => {
-      const amt = Number(p.amount || 0);
-      const change = Number(p.changeAmount || 0);
-      totalRevenue += amt; // business revenue hamesha order-value pe based (780), overpayment nahi
-
-      if (p.method === 'cash') {
-        cashTotal += amt;
-      } else {
-        const accountReceived = amt + change; // ✅ us account ka asal amount
-        cashTotal -= change; // ✅ return cash se cut
-
-        if (p.method === 'mezan_bank') mezan_bankTotal += accountReceived;
-        else if (p.method === 'online') onlineTotal += accountReceived;
-        else if (p.method === 'jazz_cash') jazz_cashTotal += accountReceived;
-        else if (p.method === 'easypaisa') easypaisaTotal += accountReceived;
-
-        if (change > 0) {
-          returns.push({
-            orderNumber: p.orderId?.orderNumber || '-',
-            method: p.method,
-            returnAmount: change,
-            paidAt: p.paidAt,
-          });
-        }
-      }
-    });
-
+    // ✅ Keys MUST match frontend exactly
     const summary = {
-      totalRevenue,
+      totalRevenue: payments.reduce((s, p) => s + p.amount, 0),
       totalTransactions: payments.length,
-      cashTotal,
-      mezan_bankTotal,
-      onlineTotal,
-      jazz_cashTotal,
-      easypaisaTotal,
-      totalReturns: returns.reduce((s, r) => s + r.returnAmount, 0), // ✅ NEW
+      cashTotal: payments.filter(p => p.method === 'cash').reduce((s, p) => s + p.amount, 0),
+      mezan_bankTotal: payments.filter(p => p.method === 'mezan_bank').reduce((s, p) => s + p.amount, 0),
+      onlineTotal: payments.filter(p => p.method === 'online').reduce((s, p) => s + p.amount, 0),
+      jazz_cashTotal: payments.filter(p => p.method === 'jazz_cash').reduce((s, p) => s + p.amount, 0),
+      easypaisaTotal: payments.filter(p => p.method === 'easypaisa').reduce((s, p) => s + p.amount, 0),
     };
 
     res.json({
@@ -1135,7 +1056,6 @@ exports.getAmountSummary = async (req, res) => {
         end: sessionEnd.toISOString(),
       },
       summary,
-      returns, // ✅ NEW — "Return" list report mein
       recentPayments: payments.slice(0, 10),
     });
   } catch (error) {
@@ -1143,7 +1063,7 @@ exports.getAmountSummary = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-//asad
+//asad ul islam
 
 exports.addMissedOrderPayment = async (req, res) => {
   try {
