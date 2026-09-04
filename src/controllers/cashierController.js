@@ -649,9 +649,10 @@ exports.getCashierShiftReport = async (req, res) => {
     }).populate('addedBy', 'name');
 
     // ── Revenue summary ──
+    // ✅ har payment ka asal account-received amount aur cash-return calculate
     let cashReceived = 0, mezan_bankReceived = 0, onlineReceived = 0, jazzReceived = 0, easyReceived = 0;
     let totalRevenue = 0;
-    const returns = []; // ✅ NEW — "Return" entries report/slip ke liye
+    const returns = []; // ✅ "Return" entries report/slip ke liye
 
     payments.forEach(p => {
       const amt = Number(p.amount || 0);
@@ -682,6 +683,9 @@ exports.getCashierShiftReport = async (req, res) => {
 
     const totalReturns = returns.reduce((s, r) => s + r.returnAmount, 0);
 
+    // ── Expense summary ── ✅ yehi missing ho gaya tha
+    const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
+
     const expensesByMethod = {};
     expenses.forEach(e => {
       const method = e.paymentMethod || 'cash';
@@ -701,14 +705,16 @@ exports.getCashierShiftReport = async (req, res) => {
       },
       payments,
       expenses,
+      returns,          // ✅ NEW
       summary: {
         totalOrders: payments.length,
         totalRevenue,
         cashReceived,
-        mezan_bankReceived,   // ✅ consistent key
+        mezan_bankReceived,
         onlineReceived,
         jazzReceived,
         easyReceived,
+        totalReturns,   // ✅ NEW
         totalExpenses,
         expensesByMethod,
         netAmount,
